@@ -1,0 +1,120 @@
+app:
+  name: 業務文書メタ情報ジェネレータ
+  description: 業務文書の本文を受け取り、category / keywords / summary を JSON で返す。Copilot向け前処理のメタ付与に使用。
+  mode: workflow
+  icon: "\U0001F4C4"
+  icon_background: "#E0F2FE"
+version: "0.1.5"
+kind: app
+
+workflow:
+  environment_variables: []
+  conversation_variables: []
+  features:
+    file_upload:
+      enabled: false
+    opening_statement: ""
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+
+  graph:
+    edges:
+      - id: start-to-llm
+        source: start_node
+        target: llm_node
+        sourceHandle: source
+        targetHandle: target
+        type: custom
+        data:
+          sourceType: start
+          targetType: llm
+          isInLoop: false
+      - id: llm-to-end
+        source: llm_node
+        target: end_node
+        sourceHandle: source
+        targetHandle: target
+        type: custom
+        data:
+          sourceType: llm
+          targetType: end
+          isInLoop: false
+
+    nodes:
+      # -------- 開始ノード: 入力変数 text --------
+      - id: start_node
+        type: custom
+        position:
+          x: 80
+          y: 240
+        data:
+          type: start
+          title: 開始
+          desc: 業務文書の本文を受け取る
+          variables:
+            - variable: text
+              label: 文書本文
+              type: paragraph
+              required: true
+              max_length: 48000
+
+      # -------- LLMノード: メタ情報をJSONで生成 --------
+      - id: llm_node
+        type: custom
+        position:
+          x: 400
+          y: 240
+        data:
+          type: llm
+          title: メタ情報生成
+          desc: category / keywords / summary を JSON 生成
+          model:
+            provider: openai
+            name: gpt-4o-mini
+            mode: chat
+            completion_params:
+              temperature: 0.2
+          prompt_template:
+            - role: system
+              text: |
+                あなたは社内業務文書を分類する専門家です。
+                与えられた文書を読み、以下を判定してください。
+
+                - category: 文書が属する業務カテゴリを日本語で1つ（例: 申請手続き, 研修, 顧客対応, 規程, 議事録 など）
+                - keywords: 検索の手がかりになる重要語を3〜5個（日本語、配列）
+                - summary: 文書の要点を1文で（80文字以内、日本語）
+
+                必ず次のJSON形式のみで出力してください。前置き・後書き・コードブロック記号は一切付けないこと。
+                {"category": "...", "keywords": ["...", "..."], "summary": "..."}
+            - role: user
+              text: |
+                以下の業務文書を分類してください。
+
+                {{#start_node.text#}}
+          vision:
+            enabled: false
+
+      # -------- 終了ノード: result として出力 --------
+      - id: end_node
+        type: custom
+        position:
+          x: 720
+          y: 240
+        data:
+          type: end
+          title: 終了
+          desc: 生成結果を result として返す
+          outputs:
+            - variable: result
+              value_selector:
+                - llm_node
+                - text
