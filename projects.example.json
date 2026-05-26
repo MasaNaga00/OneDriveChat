@@ -1,0 +1,21 @@
+{
+  "_comment": "案件ごとの処理設定。source(元フォルダ)とout(Markdown出力先)はフルパスでOK。場所がバラバラでも指定できる。manifestを省略するとoutフォルダ内にmanifest.jsonを自動作成する。",
+  "projects": [
+    {
+      "name": "案件A_新製品ライン",
+      "source": "C:/Users/masashi/Documents/案件A/資料",
+      "out": "C:/Users/masashi/CopilotKnowledge/案件A"
+    },
+    {
+      "name": "案件B_既存改修",
+      "source": "D:/共有/案件B資料",
+      "out": "C:/Users/masashi/CopilotKnowledge/案件B"
+    },
+    {
+      "name": "案件C_保守",
+      "source": "C:/Users/masashi/Desktop/C社対応",
+      "out": "C:/Users/masashi/CopilotKnowledge/案件C",
+      "manifest": "C:/Users/masashi/CopilotKnowledge/案件C/manifest.json"
+    }
+  ]
+}

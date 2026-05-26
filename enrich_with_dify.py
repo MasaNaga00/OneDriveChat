@@ -19,11 +19,15 @@ preprocess_for_copilot.py が出力した Markdown 群を読み込み、
       の構成をそのまま使える。
 
 使い方:
-    export DIFY_API_KEY="app-xxxxxxxx"
-    python enrich_with_dify.py  Markdownフォルダ
-        [--base-url https://api.dify.ai/v1]
-        [--max-chars 6000]
-        [--dry-run]
+    # 接続情報は .env に書く(同じフォルダに .env を置く)
+    #   DIFY_API_KEY=app-xxxxxxxx
+    #   DIFY_BASE_URL=https://api.dify.ai/v1
+    #   DIFY_INPUT_VAR=text
+    #   DIFY_MAX_CHARS=6000
+    #   LOCAL_MARKDOWN_DIR=./output_markdown
+    python enrich_with_dify.py                 # .env の LOCAL_MARKDOWN_DIR を使う
+    python enrich_with_dify.py  Markdownフォルダ  # 引数で上書きも可
+        [--base-url ...] [--input-var ...] [--max-chars N] [--dry-run]
 """
 
 import os
@@ -35,6 +39,13 @@ import argparse
 from pathlib import Path
 
 import requests
+
+# .env があれば読み込む(python-dotenv が無くても動くようにフォールバック)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -163,18 +174,27 @@ def merge_meta(fm: dict, meta: dict) -> dict:
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("md_dir", help="Markdownフォルダ(preprocess_for_copilotの出力)")
-    ap.add_argument("--base-url", default="https://api.dify.ai/v1")
-    ap.add_argument("--input-var", default="text", help="Difyワークフローの入力変数名")
-    ap.add_argument("--max-chars", type=int, default=6000,
+    ap.add_argument("md_dir", nargs="?", default=os.getenv("LOCAL_MARKDOWN_DIR"),
+                    help="Markdownフォルダ(未指定時は .env の LOCAL_MARKDOWN_DIR)")
+    ap.add_argument("--base-url",
+                    default=os.getenv("DIFY_BASE_URL", "https://api.dify.ai/v1"))
+    ap.add_argument("--input-var",
+                    default=os.getenv("DIFY_INPUT_VAR", "text"),
+                    help="Difyワークフローの入力変数名")
+    ap.add_argument("--max-chars", type=int,
+                    default=int(os.getenv("DIFY_MAX_CHARS", "6000")),
                     help="Difyに渡す本文の最大文字数(長文は先頭を要約材料にする)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Difyを呼ばず対象ファイルだけ表示")
     args = ap.parse_args()
 
+    if not args.md_dir:
+        print("Markdownフォルダを指定してください(引数 または .env の LOCAL_MARKDOWN_DIR)。")
+        sys.exit(1)
+
     api_key = os.environ.get("DIFY_API_KEY")
     if not api_key and not args.dry_run:
-        print("環境変数 DIFY_API_KEY が未設定です。")
+        print("DIFY_API_KEY が未設定です(.env か環境変数で指定してください)。")
         sys.exit(1)
 
     md_dir = Path(args.md_dir)

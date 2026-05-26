@@ -3,7 +3,7 @@
 """
 Microsoft 365 Copilot 向け ナレッジ前処理スクリプト
 ====================================================
-ローカルフォルダ内の docx / pptx / xlsx / pdf / msg / txt を、
+ローカルフォルダ内の docx / pptx / xlsx / pdf / msg / txt / html を、
 検索されやすい Markdown に正規化して出力する。
 
 使い方:
@@ -25,6 +25,8 @@ import fitz                    # PyMuPDF: pdf
 import pandas as pd            # xlsx
 from pptx import Presentation  # pptx
 import extract_msg            # .msg
+from bs4 import BeautifulSoup            # html パース
+from markdownify import markdownify as _md  # html -> markdown
 
 # Copilot/Graph のインデックス上限(解析テキスト4MB)に対する安全側のしきい値。
 # 1ファイルがこれを超えそうなら章/トピック単位に分割する。
@@ -135,6 +137,31 @@ def conv_txt(path: Path) -> str:
     return path.read_text(errors="replace")
 
 
+def conv_html(path: Path) -> str:
+    # 文字コードを判定しつつ読み込む
+    raw = None
+    for enc in ("utf-8", "cp932", "shift_jis"):
+        try:
+            raw = path.read_text(encoding=enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if raw is None:
+        raw = path.read_text(errors="replace")
+
+    soup = BeautifulSoup(raw, "html.parser")
+    # 本文と無関係な要素を除去(検索ノイズになるため)
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "iframe"]):
+        tag.decompose()
+    # <body> があればその中だけを対象に
+    target = soup.body if soup.body else soup
+    # リンクは文字だけ残す(URLはノイズになりやすい)、見出しはATX(#)形式
+    text = _md(str(target), heading_style="ATX", strip=["a"])
+    # 連続する空行を圧縮して整形
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
 # 拡張子 -> 変換関数のディスパッチ表
 CONVERTERS = {
     ".docx": conv_docx,
@@ -143,6 +170,8 @@ CONVERTERS = {
     ".pdf":  conv_pdf,
     ".msg":  conv_msg,
     ".txt":  conv_txt,
+    ".html": conv_html,
+    ".htm":  conv_html,
 }
 
 
