@@ -51,6 +51,62 @@ from enrich_with_dify import (
 
 MANIFEST_VERSION = 1
 
+# このいずれかの文字で始まるフォルダ名は、配下ごとRAG対象外にする。
+# .env の EXCLUDE_PREFIXES で上書き可能(カンマ区切り)。
+DEFAULT_EXCLUDE_PREFIXES = ["_", "▪️", "■", "・", "~", "."]
+
+
+def get_exclude_prefixes() -> list:
+    raw = os.getenv("EXCLUDE_PREFIXES", "").strip()
+    if raw:
+        return [p for p in (s.strip() for s in raw.split(",")) if p]
+    return DEFAULT_EXCLUDE_PREFIXES
+
+
+def is_excluded(rel_path: Path, prefixes: list) -> bool:
+    """相対パスの途中のフォルダ名、またはファイル名自体が、
+    除外プレフィックスで始まれば True。
+    例: prefixes=['_'] のとき
+        '_作業中/資料.docx'  → フォルダ _作業中 で除外
+        'A/_メモ.txt'        → ファイル名 _メモ.txt で除外
+        'A/B/正式.docx'      → 除外されない"""
+    # フォルダ部分とファイル名の両方を判定対象にする
+    for part in rel_path.parts:
+        for pre in prefixes:
+            if part.startswith(pre):
+                return True
+    return False
+
+
+# 同じ basename で両方あった場合に優先する拡張子(左ほど優先)。
+# PPTX を PDF より優先: PDFは送付用に固めたもので、PPTXの方が構造を取りやすい。
+FORMAT_PRIORITY = [".pptx", ".docx", ".xlsx", ".html", ".htm", ".pdf", ".txt", ".msg"]
+
+
+def dedup_same_name(files: list) -> tuple:
+    """同じフォルダ・同じファイル名(拡張子違い)が複数ある場合、
+    FORMAT_PRIORITY に従って1つだけ残す。
+    返り値: (残したファイル一覧, 除外したファイル一覧)"""
+    # (フォルダ, ベース名) ごとに候補をまとめる
+    groups = {}
+    for p in files:
+        gkey = (str(p.parent), p.stem)
+        groups.setdefault(gkey, []).append(p)
+
+    kept, dropped = [], []
+    for gkey, cands in groups.items():
+        if len(cands) == 1:
+            kept.append(cands[0])
+            continue
+        # 優先順位でソート(リストにない拡張子は最後尾)
+        def rank(path):
+            ext = path.suffix.lower()
+            return FORMAT_PRIORITY.index(ext) if ext in FORMAT_PRIORITY else 999
+        cands_sorted = sorted(cands, key=rank)
+        kept.append(cands_sorted[0])
+        dropped.extend(cands_sorted[1:])
+    return kept, dropped
+
 
 # ---------------------------------------------------------------------------
 # ハッシュ & 台帳
@@ -143,7 +199,9 @@ def process_project(proj: dict, opts: dict) -> dict:
     manifest_path = Path(proj.get("manifest") or (out_dir / "manifest.json"))
 
     result = {"name": name, "changed": 0, "unchanged": 0,
-              "deleted": 0, "enriched": 0, "error": None}
+              "deleted": 0, "enriched": 0, "error": None,
+              "upload": [], "remove": [],
+              "onedrive_folder": proj.get("onedrive_folder", name)}
 
     print(f"\n==== 案件: {name} ====")
     if not source_dir.exists():
@@ -153,8 +211,21 @@ def process_project(proj: dict, opts: dict) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     use_dify = not opts["no_dify"]
-    src_files = [p for p in sorted(source_dir.rglob("*"))
+    prefixes = opts["exclude_prefixes"]
+    all_files = [p for p in sorted(source_dir.rglob("*"))
                  if p.is_file() and p.suffix.lower() in pp.CONVERTERS]
+    # 除外プレフィックスで始まるフォルダ/ファイルを除く
+    kept_files, excluded_n = [], 0
+    for p in all_files:
+        if is_excluded(p.relative_to(source_dir), prefixes):
+            excluded_n += 1
+        else:
+            kept_files.append(p)
+    # 同名(拡張子違い)の重複を排除。PPTX優先でPDFを落とす等。
+    src_files, dropped = dedup_same_name(kept_files)
+    for d in dropped:
+        print(f"    (重複スキップ) {d.relative_to(source_dir)} "
+              f"… 同名の優先形式を採用")
 
     manifest = {} if opts["force"] else load_manifest(manifest_path)
     new_manifest = {}
@@ -162,7 +233,9 @@ def process_project(proj: dict, opts: dict) -> dict:
 
     print(f"  元: {source_dir}")
     print(f"  出力: {out_dir}")
-    print(f"  対象 {len(src_files)} 件 (台帳 {len(manifest)} 件)")
+    print(f"  対象 {len(src_files)} 件 (台帳 {len(manifest)} 件"
+          + (f" / 除外 {excluded_n} 件" if excluded_n else "")
+          + (f" / 重複 {len(dropped)} 件" if dropped else "") + ")")
 
     for src in src_files:
         key = str(src.relative_to(source_dir))
@@ -197,6 +270,9 @@ def process_project(proj: dict, opts: dict) -> dict:
             new_manifest[key] = {"hash": h, "outputs": out_strs}
             tag = "新規" if not prev else "変更"
             print(f"    ✓ [{tag}] {key} → {len(outputs)}ファイル")
+            # Selenium に渡すアップロード対象として記録
+            for o in out_strs:
+                result["upload"].append(o)
         except Exception as e:
             print(f"    ✗ {key} ({e})")
 
@@ -208,6 +284,8 @@ def process_project(proj: dict, opts: dict) -> dict:
                 print(f"    [削除] {old}")
             else:
                 Path(old).unlink(missing_ok=True)
+            # Selenium 側で OneDrive 上からも消せるよう、ファイル名を記録
+            result["remove"].append(Path(old).name)
         if not opts["dry_run"]:
             print(f"    🗑 削除: {key}")
     result["deleted"] = len(deleted)
@@ -263,6 +341,7 @@ def main():
         "base_url": os.getenv("DIFY_BASE_URL", "https://api.dify.ai/v1"),
         "input_var": os.getenv("DIFY_INPUT_VAR", "text"),
         "max_chars": int(os.getenv("DIFY_MAX_CHARS", "6000")),
+        "exclude_prefixes": get_exclude_prefixes(),
     }
     if not opts["no_dify"] and not opts["api_key"] and not args.dry_run:
         print("DIFY_API_KEY が未設定です。--no-dify で変換のみ実行できます。")
@@ -289,6 +368,99 @@ def main():
           + (f" / Difyメタ付与{tot['enriched']}ファイル" if not opts["no_dify"] else ""))
     if args.dry_run:
         print("\n(dry-run: 実際の処理はしていません)")
+        return
+
+    # ---- Selenium に渡すアップロード指示リストを書き出す ----
+    # 更新のあったファイルだけを「ローカルパス → OneDrive上げ先フォルダ」で列挙。
+    write_upload_list(results)
+
+
+def write_upload_list(results: list):
+    """更新ファイルのアップロード指示を JSON と CSV で出力する。
+    Selenium 側はこれを読んで、記載されたファイルだけを上げればよい。"""
+    import datetime
+    out_path_json = Path(os.getenv("UPLOAD_LIST_PATH", "./upload_list.json"))
+
+    tasks = []
+    for r in results:
+        if r["error"]:
+            continue
+        folder = r["onedrive_folder"]
+        for local in r["upload"]:
+            tasks.append({
+                "action": "upload",
+                "local_path": str(Path(local).resolve()),
+                "onedrive_folder": folder,      # この案件の上げ先(OneDrive側フォルダ名)
+                "file_name": Path(local).name,
+            })
+        for fname in r["remove"]:
+            tasks.append({
+                "action": "remove",
+                "onedrive_folder": folder,
+                "file_name": fname,
+            })
+
+    payload = {
+        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "total": len(tasks),
+        "tasks": tasks,
+    }
+    out_path_json.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 人が見て確認しやすいよう CSV も併せて出力
+    out_path_csv = out_path_json.with_suffix(".csv")
+    lines = ["action,onedrive_folder,file_name,local_path"]
+    for t in tasks:
+        lines.append(",".join([
+            t["action"], t["onedrive_folder"], t["file_name"],
+            t.get("local_path", ""),
+        ]))
+    out_path_csv.write_text("\n".join(lines), encoding="utf-8")
+
+    # ---- 人が手作業するための分かりやすい指示書(Markdown) ----
+    md_path = out_path_json.with_suffix(".md")
+    md = []
+    md.append("# OneDrive 手動更新 作業リスト")
+    md.append("")
+    md.append(f"生成: {payload['generated_at']}")
+    md.append("")
+    upn = sum(1 for t in tasks if t["action"] == "upload")
+    rmn = sum(1 for t in tasks if t["action"] == "remove")
+    if upn == 0 and rmn == 0:
+        md.append("**更新はありません。** OneDrive 側の作業は不要です。")
+    else:
+        md.append(f"このリストの通りに OneDrive を更新してください"
+                  f"（アップロード {upn} 件 / 削除 {rmn} 件）。")
+        md.append("チェックボックスは作業済みの記録用です。")
+        md.append("")
+        # 案件ごとにまとめる
+        for r in results:
+            if r["error"] or (not r["upload"] and not r["remove"]):
+                continue
+            md.append(f"## 案件: {r['name']}")
+            md.append(f"アップロード先フォルダ: `{r['onedrive_folder']}`")
+            md.append("")
+            if r["upload"]:
+                md.append("### ⬆ アップロード（このファイルを上記フォルダに上げる）")
+                for local in r["upload"]:
+                    p = Path(local)
+                    md.append(f"- [ ] `{p.name}`")
+                    md.append(f"      場所: `{p.resolve()}`")
+                md.append("")
+            if r["remove"]:
+                md.append("### 🗑 削除（上記フォルダから消す）")
+                for fname in r["remove"]:
+                    md.append(f"- [ ] `{fname}`")
+                md.append("")
+    md_path.write_text("\n".join(md), encoding="utf-8")
+
+    print(f"\n📤 更新リストを書き出しました:")
+    print(f"   {md_path}    ← 手動作業用（人が読む）")
+    print(f"   {out_path_json}  ← Selenium用（アップロード {upn} / 削除 {rmn}）")
+    print(f"   {out_path_csv}   ← 確認用CSV")
+    if upn == 0 and rmn == 0:
+        print("   ※ 更新ファイルなし。アップロード作業は不要です。")
 
 
 if __name__ == "__main__":

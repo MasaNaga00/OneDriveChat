@@ -104,6 +104,56 @@ def conv_pdf(path: Path) -> str:
     return body
 
 
+# 日本語Outlookの引用区切りパターン(これ以降を引用とみなす)
+_QUOTE_PATTERNS = [
+    r"^-+\s*元のメッセージ\s*-+",        # -----元のメッセージ-----
+    r"^-+\s*Original Message\s*-+",        # 英語混在の保険
+    r"^-+\s*転送されたメッセージ\s*-+",    # 転送
+    r"^_{5,}",                              # ____ の区切り線
+    r"^差出人:\s*.+",                       # 差出人: ヘッダ
+    r"^From:\s*.+",                         # From: ヘッダ
+    r"^送信者:\s*.+",                       # 送信者: の表記ゆれ
+]
+_QUOTE_COMPILED = [re.compile(p) for p in _QUOTE_PATTERNS]
+# 「2024年1月1日(月) 山田 <..@..>:」などの返信定型句
+_REPLY_INTRO = re.compile(r"^\d{4}年\d{1,2}月\d{1,2}日.*(?:書きました|<.+@.+>).*[:：]?\s*$")
+
+
+def _find_quote_start(lines):
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if any(c.match(s) for c in _QUOTE_COMPILED) or _REPLY_INTRO.match(s):
+            return i
+    return None
+
+
+def strip_quoted(body: str, min_new_chars: int = 20, context_lines: int = 8) -> str:
+    """メール本文から引用(過去のやり取り)を除去し新規本文だけ残す。
+    引用チェーンの重複を減らすのが目的。
+    ただし新規本文が極端に短い場合(「承知しました」等)は、
+    直近の引用を少しだけ残して文脈を保つ。"""
+    lines = body.splitlines()
+    cut = _find_quote_start(lines)
+    if cut is None:
+        return body.rstrip()
+
+    new_part = "\n".join(lines[:cut]).rstrip()
+
+    if len(new_part.replace("\n", "").strip()) < min_new_chars:
+        quoted = lines[cut:]
+        context = []
+        for j, line in enumerate(quoted):
+            if j > 0 and (any(c.match(line.strip()) for c in _QUOTE_COMPILED)
+                          or _REPLY_INTRO.match(line.strip())):
+                break
+            context.append(line)
+            if len(context) >= context_lines:
+                break
+        ctx = "\n".join(context).rstrip()
+        return new_part + "\n\n[文脈のため直近の引用を一部保持]\n" + ctx
+    return new_part
+
+
 def conv_msg(path: Path) -> str:
     msg = extract_msg.Message(str(path))
     header = []
@@ -117,7 +167,9 @@ def conv_msg(path: Path) -> str:
         header.append(f"宛先: {msg.to}")
     if msg.cc:
         header.append(f"CC: {msg.cc}")
-    body = (msg.body or "").strip()
+    raw_body = (msg.body or "").strip()
+    # 引用チェーンの重複を除去(新規本文だけ残す)
+    body = strip_quoted(raw_body)
     # 添付ファイル名も検索の手がかりとして残す
     attach_names = [a.longFilename or a.shortFilename
                     for a in msg.attachments if (a.longFilename or a.shortFilename)]
