@@ -43,9 +43,51 @@ import requests
 # .env があれば読み込む(python-dotenv が無くても動くようにフォールバック)
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    if getattr(sys, "frozen", False):
+        _base = Path(sys.executable).resolve().parent
+    else:
+        _base = Path(__file__).resolve().parent
+    load_dotenv(_base / ".env")
 except ImportError:
     pass
+
+
+# ---------------------------------------------------------------------------
+# TLS証明書の検証設定(二段構え)
+#   1. CA証明書ファイルが指定されていれば、それを使う(ファイル優先)
+#   2. 無ければ truststore で OS(Windows)の証明書ストアにフォールバック
+#      → IT部門が配布した社内CAなどを Python がそのまま信頼できる
+# ---------------------------------------------------------------------------
+def setup_tls() -> str | bool:
+    """requests の verify に渡す値を返す。
+    戻り値: CA証明書ファイルのパス(str) または True(検証する/ストア委譲)。
+    環境変数:
+      DIFY_CA_BUNDLE       … CA証明書ファイル(.pem/.crt)のパス。あれば最優先。
+      DIFY_USE_TRUSTSTORE  … "false" で truststore フォールバックを無効化(既定は有効)
+    """
+    ca_file = os.getenv("DIFY_CA_BUNDLE", "").strip()
+    if ca_file:
+        if Path(ca_file).exists():
+            print(f"[TLS] 証明書ファイルを使用: {ca_file}")
+            return ca_file
+        print(f"[TLS] 警告: 指定された証明書ファイルが見つかりません: {ca_file}")
+        print("      → OSの証明書ストアにフォールバックします。")
+
+    # ファイル指定が無い/見つからない → truststore で OS ストアに委ねる
+    use_ts = os.getenv("DIFY_USE_TRUSTSTORE", "true").strip().lower() != "false"
+    if use_ts:
+        try:
+            import truststore
+            truststore.inject_into_ssl()  # 以降 requests は OS の証明書ストアで検証
+            print("[TLS] OSの証明書ストア(truststore)を使用します。")
+        except ImportError:
+            print("[TLS] truststore 未導入。標準のcertifiで検証します。")
+            print("      社内CAでエラーが出る場合: pip install truststore")
+    return True  # verify=True (truststore注入済みならOSストア、未注入ならcertifi)
+
+
+# 起動時に一度だけ TLS 設定を解決(injectは早い段階で行うのが望ましい)
+_VERIFY = setup_tls()
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +145,8 @@ def call_dify(text: str, api_key: str, base_url: str,
     last_err = None
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp = requests.post(url, headers=headers, json=payload,
+                                  timeout=timeout, verify=_VERIFY)
             resp.raise_for_status()
             data = resp.json()
             # blocking の戻り: data.outputs.result に格納される構成を想定

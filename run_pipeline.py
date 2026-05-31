@@ -36,10 +36,18 @@ import hashlib
 import argparse
 from pathlib import Path
 
-# .env 読み込み
+# 実行ファイル(cx_Freeze)化されている場合は exe の場所、
+# 通常の .py 実行なら このファイルの場所を「基準ディレクトリ」とする。
+# これにより、どこから起動しても .env / projects.json を exe の隣から読める。
+if getattr(sys, "frozen", False):
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    APP_DIR = Path(__file__).resolve().parent
+
+# .env 読み込み(基準ディレクトリの .env を明示的に指す)
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(APP_DIR / ".env")
 except ImportError:
     pass
 
@@ -312,8 +320,8 @@ def load_projects(path: Path) -> list:
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--projects", default=os.getenv("PROJECTS_FILE", "./projects.json"),
-                    help="案件設定JSON(既定 ./projects.json または .env の PROJECTS_FILE)")
+    ap.add_argument("--projects", default=os.getenv("PROJECTS_FILE", str(APP_DIR / "projects.json")),
+                    help="案件設定JSON(既定 <exeの場所>/projects.json または .env の PROJECTS_FILE)")
     ap.add_argument("--only", help="この案件名だけ処理(部分一致)")
     ap.add_argument("--force", action="store_true", help="台帳を無視して全件再処理")
     ap.add_argument("--no-dify", action="store_true", help="変換のみ。Difyに送らない")
@@ -379,7 +387,7 @@ def write_upload_list(results: list):
     """更新ファイルのアップロード指示を JSON と CSV で出力する。
     Selenium 側はこれを読んで、記載されたファイルだけを上げればよい。"""
     import datetime
-    out_path_json = Path(os.getenv("UPLOAD_LIST_PATH", "./upload_list.json"))
+    out_path_json = Path(os.getenv("UPLOAD_LIST_PATH", str(APP_DIR / "upload_list.json")))
 
     tasks = []
     for r in results:
