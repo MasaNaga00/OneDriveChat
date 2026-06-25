@@ -1,17 +1,10 @@
 {
   "_comment": "案件ごとの処理設定。source(元フォルダ)とout(Markdown出力先)はフルパスでOK。場所がバラバラでも指定できる。onedrive_folderはSelenium側がアップする先のOneDrive上のフォルダ名(省略時は案件name)。manifestを省略するとoutフォルダ内に自動作成。",
+
   "projects": [
-    {
-      "name": "案件A_新製品ライン",
-      "source": "C:/Users/masashi/Documents/案件A/資料",
-      "out": "C:/Users/masashi/CopilotKnowledge/案件A",
-      "onedrive_folder": "案件A_新製品ライン"
-    },
-    {
-      "name": "案件B_既存改修",
-      "source": "D:/共有/案件B資料",
-      "out": "C:/Users/masashi/CopilotKnowledge/案件B",
-      "onedrive_folder": "案件B_既存改修"
-    }
+    {"name": "特殊案件", "source": "D:/別の場所/特殊案件", "out": "C:/CopilotKnowledge/特殊案件", "onedrive_folder": "特殊案件"}
+  ],
+  "scan_parents": [
+    {"parent": "C:/過去案件", "out_base": "C:/CopilotKnowledge", "onedrive_base": "CopilotKnowledge"}
   ]
 }

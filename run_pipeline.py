@@ -302,10 +302,80 @@ def process_project(proj: dict, opts: dict) -> dict:
         save_manifest(manifest_path, new_manifest)
     return result
 
+def expand_scan_parents(data: dict) -> list:
+    """projects.json の scan_parents を読み、親フォルダ直下のサブフォルダを
+    案件として自動展開する。個別指定の projects と併用可能。
+
+    scan_parents の各要素:
+        parent       … 案件が並ぶ親フォルダ(フルパス)。この直下の各フォルダが1案件になる
+        out_base     … 出力先のベース。<out_base>/<サブフォルダ名> が各案件の out になる
+        onedrive_base… OneDrive上の上げ先ベース。省略時はサブフォルダ名のみ
+
+    注意:
+      - 直下のサブフォルダのみ展開(孫は案件にしない)
+      - 除外プレフィックス(_ ▪️ 等)で始まるフォルダはスキップ
+      - 既に projects に同じ source があれば重複登録しない
+    """
+    projects = list(data.get("projects", []))  # 既存の個別指定を引き継ぐ
+    exclude_prefixes = get_exclude_prefixes()
+
+    # 既存 source の集合(重複チェック用。末尾スラッシュ差を吸収するため resolve)
+    existing_sources = set()
+    for p in projects:
+        if p.get("source"):
+            try:
+                existing_sources.add(Path(p["source"]).resolve())
+            except (OSError, RuntimeError):
+                existing_sources.add(Path(p["source"]))
+
+    for sp in data.get("scan_parents", []):
+        parent_raw = sp.get("parent")
+        out_base_raw = sp.get("out_base")
+        if not parent_raw or not out_base_raw:
+            print(f"  ⚠ scan_parents に parent/out_base が無い項目をスキップ: {sp}")
+            continue
+
+        parent = Path(parent_raw)
+        out_base = Path(out_base_raw)
+        onedrive_base = (sp.get("onedrive_base") or "").strip("/")
+
+        if not parent.exists():
+            print(f"  ⚠ 親フォルダが見つかりません(スキップ): {parent}")
+            continue
+
+        added = 0
+        for sub in sorted(parent.iterdir()):
+            if not sub.is_dir():
+                continue
+            # 除外プレフィックスで始まるフォルダは案件にしない
+            if any(sub.name.startswith(pre) for pre in exclude_prefixes):
+                continue
+            # 既に個別 or 別 scan_parent で登録済みなら重複させない
+            try:
+                sub_key = sub.resolve()
+            except (OSError, RuntimeError):
+                sub_key = sub
+            if sub_key in existing_sources:
+                continue
+
+            onedrive_folder = (f"{onedrive_base}/{sub.name}"
+                               if onedrive_base else sub.name)
+            projects.append({
+                "name": sub.name,
+                "source": str(sub),
+                "out": str(out_base / sub.name),
+                "onedrive_folder": onedrive_folder,
+            })
+            existing_sources.add(sub_key)
+            added += 1
+
+        print(f"  ＋ 親フォルダ展開: {parent} → {added} 案件を自動登録")
+
+    return projects
 
 def load_projects(path: Path) -> list:
     data = json.loads(path.read_text(encoding="utf-8"))
-    projects = data.get("projects", [])
+    projects = expand_scan_parents(data)     # ← 変更：scan_parents を展開
     valid = []
     for p in projects:
         if not p.get("source") or not p.get("out"):
@@ -313,7 +383,6 @@ def load_projects(path: Path) -> list:
             continue
         valid.append(p)
     return valid
-
 
 # ---------------------------------------------------------------------------
 # メイン
